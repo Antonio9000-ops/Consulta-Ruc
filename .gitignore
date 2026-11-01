@@ -1,0 +1,33 @@
+# Entorno virtual y caché de Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Variables de entorno y credenciales (nunca en Git)
+.env
+.env.*
+*.pem
+*.key
+
+# Perfiles de navegador y artefactos de Playwright
+.browser-profile/
+playwright-report/
+test-results/
+*.webm
+
+# Resultados y evidencias que pueden contener datos sensibles
+output/*.xlsx
+evidence/screenshots/*
+evidence/logs/*
+!evidence/screenshots/.gitkeep
+!evidence/logs/.gitkeep
+!output/.gitkeep
+
+# Archivos temporales del sistema
+*.tmp
+*.log
+.DS_Store
+Thumbs.db
