@@ -1,28 +1,12 @@
 """Navegación y consulta en SUNAT (e-consultaruc).
 
 Selectores verificados el 2026-11-01 contra el sitio real (abierto manualmente en navegador visible).
-
-    #form01            (form[name=mainForm], action=jcrS00Alias, method=post)
-    #btnPorRuc         pestaña "Por RUC"
-    #txtRuc            (input[id=txtRuc], name=search1, type=tel) campo del RUC
-    #btnAceptar        botón "Buscar" (button[id=btnAceptar])
-    #imgCodigo         imagen CAPTCHA (id=imgCodigo), hoy oculta en este entorno
-    #txtCodigo         (input[id=txtCodigo], name=codigo) entrada del CAPTCHA, hoy oculta
-    #spanRefrescaCodigo refresca CAPTCHA (id=spanRefrescaCodigo)
-
-Escenarios
-----------
-- Si SUNAT muestra un desafío Cloudflare/Turnstile (título "Un momento…" o URL challenge), el flujo espera a que una persona lo resuelva en la ventana visible, o aborta si `headless=True`. No se reintenta ni se intenta eludir.
-- Si aparece CAPTCHA (`#txtCodigo` visible), se requiere que una persona lo resuelva mediante ``al_detectar_captcha``; de lo contrario, se detiene el lote (`CaptchaDetectado`).
-- Si el sitio devuelve un mensaje sin resultado (ejemplo: "no se ha encontrado resultados para el ruc ingresado"), se registra `SIN RESULTADO` en el reporte.
-
-El módulo **no** asume que IDs como ``txtRuc`` existen; los registra a partir de la inspección manual. En este entorno, el CAPTCHA solo aparece ocasionalmente para agentes automatizados; el usuario puede omitir el desafío si lo desea deshabilitando la protección (no recomendado).
 """
 
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -116,13 +100,16 @@ def _texto_visible(pagina) -> str:
         return ""
 
 def hay_desafio(pagina) -> bool:
-    if "challenges.cloudflare.com" in pagina.url:
-        return True
-    titulo = (pagina.title() or "").lower()
-    if any(m in titulo for m in MARCAS_DESAFIO):
-        return True
-    texto = _texto_visible(pagina)
-    return any(m in texto for m in ("verificación de seguridad en curso", "verificacion de seguridad en curso"))
+    try:
+        if "challenges.cloudflare.com" in pagina.url:
+            return True
+        titulo = (pagina.title() or "").lower()
+        if any(m in titulo for m in MARCAS_DESAFIO):
+            return True
+        texto = _texto_visible(pagina)
+        return any(m in texto for m in ("verificación de seguridad en curso", "verificacion de seguridad en curso"))
+    except Exception:
+        return False
 
 def hay_resultado(pagina) -> bool:
     texto = _texto_visible(pagina)
@@ -154,12 +141,22 @@ class ConsultaSUNAT:
         self.config.perfil_navegador.mkdir(parents=True, exist_ok=True)
 
         self._pw = sync_playwright().start()
+        
+        # --- Opción A: Usar el Chromium de Playwright (sin channel="chrome") ---
         self._contexto = self._pw.chromium.launch_persistent_context(
             str(self.config.perfil_navegador),
             headless=self.config.headless,
+            ignore_default_args=["--enable-automation"],
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--disable-infobars",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+            ],
             locale="es-PE",
             viewport={"width": 1360, "height": 900},
         )
+        
         self._pagina = (
             self._contexto.pages[0] if self._contexto.pages else self._contexto.new_page()
         )
@@ -180,12 +177,17 @@ class ConsultaSUNAT:
         for intento in range(self.config.reintentos_transitorios + 1):
             try:
                 self._pagina.goto(URL_FORMULARIO, wait_until="domcontentloaded")
+                self._pagina.wait_for_timeout(3000)
+                self._esperar_fin_desafio()
                 self._pagina.wait_for_selector(SELECTORES["campo_ruc"], timeout=ESPERA_RESULTADO_MS)
                 return
             except Exception as error:
                 ultimo_error = error
                 if intento < self.config.reintentos_transitorios:
-                    self._pagina.wait_for_timeout(2000)
+                    try:
+                        self._pagina.wait_for_timeout(2000)
+                    except Exception:
+                        break
         self._capturar_evidencia("error_formulario")
         raise BloqueoSunat(f"No se pudo abrir el formulario de SUNAT: {ultimo_error}")
 
@@ -200,17 +202,22 @@ class ConsultaSUNAT:
             )
 
         print(
-            "AVISO: SUNAT/Cloudflare pide una verificación de seguridad.\n"
+            "\nAVISO: SUNAT/Cloudflare pide una verificación de seguridad (Check Humano).\n"
             "       Atiéndela en la ventana del navegador que se abrió.\n"
-            f"       Se esperará hasta {self.config.espera_desafio_segundos} s.\n"
-            "       Si no aparece desafío, puedes omitirlo con --headless si estás seguro.\n",
+            f"       Se esperará hasta {self.config.espera_desafio_segundos} s.\n",
             flush=True,
         )
         inicio = time.time()
         while time.time() - inicio < self.config.espera_desafio_segundos:
-            self._pagina.wait_for_timeout(2000)
+            try:
+                if self._pagina.is_closed():
+                    raise BloqueoSunat("La ventana del navegador fue cerrada manualmente.")
+                self._pagina.wait_for_timeout(2000)
+            except Exception as e:
+                raise BloqueoSunat(f"El navegador se cerró inesperadamente: {e}")
+                
             if not hay_desafio(self._pagina):
-                print("Verificación superada. Continuando...", flush=True)
+                print("Verificación superada. Continuando...\n", flush=True)
                 return
         self._capturar_evidencia("bloqueo_desafio")
         raise BloqueoSunat(
@@ -228,21 +235,26 @@ class ConsultaSUNAT:
                 f"Límite de {self.config.maximo_consultas} consultas por lote alcanzado."
             )
 
-        self._esperar_fin_desafio()
-        pagina = self._pagina
-        pagina.goto(URL_FORMULARIO, wait_until="domcontentloaded")
-        pagina.wait_for_selector(SELECTORES["campo_ruc"])
-
-        pagina.fill(SELECTORES["campo_ruc"], ruc)
-        pagina.click(SELECTORES["boton_buscar"])
-
         try:
-            pagina.wait_for_load_state("domcontentloaded")
-        except Exception:
-            pass
-        self._esperar_fin_desafio()
-        pagina.wait_for_timeout(1500)
-        self.consultas_realizadas += 1
+            self._esperar_fin_desafio()
+            pagina = self._pagina
+            pagina.goto(URL_FORMULARIO, wait_until="domcontentloaded")
+            pagina.wait_for_selector(SELECTORES["campo_ruc"])
+
+            pagina.fill(SELECTORES["campo_ruc"], ruc)
+            pagina.click(SELECTORES["boton_buscar"])
+
+            try:
+                pagina.wait_for_load_state("domcontentloaded")
+            except Exception:
+                pass
+            self._esperar_fin_desafio()
+            pagina.wait_for_timeout(1500)
+            self.consultas_realizadas += 1
+        except Exception as e:
+            if "Target page, context or browser has been closed" in str(e):
+                raise BloqueoSunat("El navegador fue cerrado antes de terminar la consulta.")
+            raise e
 
         if captcha_visible(pagina):
             return self._resolver_captcha_manual(ruc, al_detectar_captcha)
@@ -290,6 +302,8 @@ class ConsultaSUNAT:
 
     def _capturar_evidencia(self, nombre: str) -> None:
         if not self.config.guardar_evidencia_en_error or self._pagina is None:
+            return
+        if self._pagina.is_closed():
             return
         marca = datetime.now().strftime("%Y%m%d_%H%M%S")
         base = f"{marca}_{nombre}"

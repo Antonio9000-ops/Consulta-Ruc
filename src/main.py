@@ -226,58 +226,62 @@ def ejecutar_consulta(args: argparse.Namespace, resultados_validacion, total_lei
     if parciales:
         print(f"Reanudando: {len(parciales)} RUC ya consultados antes.")
     pendientes = pendientes[:limite]
-    print(f"Se consultarán {len(pendientes)} RUC (límite {limite}, pausa {config.pausa_segundos}s).")
-
+    
     errores: list[dict] = []
     abortado: str | None = None
 
-    try:
-        with ConsultaSUNAT(config) as sesion:
-            for posicion, ruc in enumerate(pendientes, start=1):
-                if posicion > 1:
-                    pausa_entre_consultas(config)
-                print(f"[{posicion}/{len(pendientes)}] {ruc} ... ", end="", flush=True)
-                try:
-                    resultado = sesion.consultar(ruc)
-                except CaptchaDetectado as error:
-                    print("CAPTCHA")
-                    errores.append(_error(ruc, "CAPTCHA", str(error)))
-                    abortado = "CAPTCHA detectado: se detiene el lote."
-                    break
-                except BloqueoSunat as error:
-                    print("BLOQUEO")
-                    errores.append(_error(ruc, "BLOQUEO", str(error)))
-                    abortado = "SUNAT bloqueó la ejecución: se detiene el lote."
-                    break
-                except Exception as error:  # fallo inesperado de un solo RUC
-                    print("ERROR")
-                    errores.append(_error(ruc, "CONSULTA", f"{type(error).__name__}: {error}"))
-                    continue
+    # --- CORRECCIÓN CLAVE: NO ABRIR NAVEGADOR SI NO HAY PENDIENTES ---
+    if not pendientes:
+        print("No hay RUC pendientes por consultar. Generando reporte directamente...")
+    else:
+        print(f"Se consultarán {len(pendientes)} RUC (límite {limite}, pausa {config.pausa_segundos}s).")
+        try:
+            with ConsultaSUNAT(config) as sesion:
+                for posicion, ruc in enumerate(pendientes, start=1):
+                    if posicion > 1:
+                        pausa_entre_consultas(config)
+                    print(f"[{posicion}/{len(pendientes)}] {ruc} ... ", end="", flush=True)
+                    try:
+                        resultado = sesion.consultar(ruc)
+                    except CaptchaDetectado as error:
+                        print("CAPTCHA")
+                        errores.append(_error(ruc, "CAPTCHA", str(error)))
+                        abortado = "CAPTCHA detectado: se detiene el lote."
+                        break
+                    except BloqueoSunat as error:
+                        print("BLOQUEO")
+                        errores.append(_error(ruc, "BLOQUEO", str(error)))
+                        abortado = "SUNAT bloqueó la ejecución: se detiene el lote."
+                        break
+                    except Exception as error:  # fallo inesperado de un solo RUC
+                        print("ERROR")
+                        errores.append(_error(ruc, "CONSULTA", f"{type(error).__name__}: {error}"))
+                        continue
 
-                if resultado.sin_resultado:
-                    estado = "SIN RESULTADO"
-                    print(f"sin resultado ({resultado.observacion})")
-                else:
-                    estado = "CONSULTADO"
-                    print(resultado.razon_social()[:50] or "ok")
+                    if resultado.sin_resultado:
+                        estado = "SIN RESULTADO"
+                        print(f"sin resultado ({resultado.observacion})")
+                    else:
+                        estado = "CONSULTADO"
+                        print(resultado.razon_social()[:50] or "ok")
 
-                for problema in detectar_respuesta_sospechosa(resultado):
-                    errores.append(_error(ruc, "CALIDAD", problema))
+                    for problema in detectar_respuesta_sospechosa(resultado):
+                        errores.append(_error(ruc, "CALIDAD", problema))
 
-                agregar_parcial(args.parcial, resultado, estado)
-                parciales[ruc] = {
-                    "ruc": resultado.ruc,
-                    "campos": resultado.campos,
-                    "fecha_consulta": resultado.fecha_consulta,
-                    "observacion": resultado.observacion,
-                    "estado": estado,
-                }
-    except BloqueoSunat as error:
-        errores.append(_error("", "NAVEGADOR", str(error)))
-        abortado = "No se pudo iniciar la sesión de navegador."
+                    agregar_parcial(args.parcial, resultado, estado)
+                    parciales[ruc] = {
+                        "ruc": resultado.ruc,
+                        "campos": resultado.campos,
+                        "fecha_consulta": resultado.fecha_consulta,
+                        "observacion": resultado.observacion,
+                        "estado": estado,
+                    }
+        except BloqueoSunat as error:
+            errores.append(_error("", "NAVEGADOR", str(error)))
+            abortado = "No se pudo iniciar la sesión de navegador."
 
     hojas = construir_libro_resultados(
-        [r.ruc for r in validos], validos, parciales, errores, total_leidos
+        validos, parciales, errores, total_leidos
     )
     escribir_libro(hojas, args.salida, args.sobrescribir)
     print(f"Reporte escrito en: {args.salida}")
