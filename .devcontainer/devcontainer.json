@@ -1,20 +1,12 @@
 {
-  "name": "Consulta RUC — SUNAT (Python + Playwright)",
-  "image": "mcr.microsoft.com/devcontainers/python:1-3.12-bookworm",
+  "name": "Proyecto RUC SUNAT",
+  "image": "mcr.microsoft.com/playwright/python:v1.49.0-jammy",
   "features": {
-    "ghcr.io/devcontainers/features/python:1": {}
+    "ghcr.io/devcontainers/features/desktop-lite:1": {}
   },
-  "postCreateCommand": "python -m pip install --upgrade pip && python -m pip install -r requirements.txt && python -m playwright install --with-deps chromium",
-  "customizations": {
-    "vscode": {
-      "extensions": ["ms-python.python", "ms-python.pytest"]
-    }
-  },
+  "forwardPorts": [6080],
   "remoteEnv": {
-    "PYTHONUNBUFFERED": "1"
+    "DISPLAY": ":1"
   },
-  "hostRequirements": {
-    "cpus": 2,
-    "memory": "4gb"
-  }
+  "postCreateCommand": "pip install -r requirements.txt"
 }
